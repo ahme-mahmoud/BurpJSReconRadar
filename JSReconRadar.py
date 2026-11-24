@@ -2677,6 +2677,14 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         mask_len = min(12, max(4, len(text) - (keep * 2)))
         return text[:keep] + ("*" * mask_len) + text[-keep:]
 
+    def _redactUrl(self, url):
+        """Redact credential-like URL parameters and user-info before display/export/logging."""
+        text = str(url)
+        query_pattern = r"(?i)([?&;](?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|secret|password|passwd|authorization|token|auth)=)[^&#;\\s]*"
+        text = re.sub(query_pattern, r"\\1[REDACTED]", text)
+        text = re.sub(r"(?i)(https?://[^/\\s:@]+:)[^/@\\s]+(@)", r"\\1[REDACTED]\\2", text)
+        return text
+
     def _displaySecret(self, row_num):
         full = self._full_values.get(str(row_num), "")
         secret_type = ""
@@ -2769,7 +2777,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
                 now.year, now.month, now.day, now.hour, now.minute, now.second)
             self._full_values[str(row_num)] = matched_value
             displayed_value = matched_value if self._showSecrets.isSelected() else self._maskSecret(matched_value, secret_type)
-            row_data = [str(row_num), severity, url_str, secret_type, displayed_value, "1", timestamp]
+            safe_url = self._redactUrl(url_str)
+            row_data = [str(row_num), severity, safe_url, secret_type, displayed_value, "1", timestamp]
 
             if messageInfo is not None:
                 self._http_messages[str(row_num)] = messageInfo
@@ -2779,7 +2788,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             self._updateStatsLabel()
 
             safe_log_value = self._maskSecret(matched_value, secret_type)
-            self._log("[+] [%s] %s -> %s : %s" % (severity, url_str, secret_type, safe_log_value[:80]))
+            self._log("[+] [%s] %s -> %s : %s" % (severity, safe_url, secret_type, safe_log_value[:80]))
         except Exception:
             self._log("[!] _addResult error: %s" % traceback.format_exc())
 
