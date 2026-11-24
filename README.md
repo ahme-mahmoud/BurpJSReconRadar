@@ -36,12 +36,15 @@ Works on **both Burp Suite Community and Professional editions**.
 - **Severity Color Coding** - CRITICAL (red), HIGH (orange), MEDIUM (yellow), INFO (gray)
 - **Severity Filter Toggles** - Click to show/hide CRITICAL, HIGH, MEDIUM, INFO
 - **Text Search Filter** - Filter results by URL, type, or value
+- **Secret Redaction** - Credential-like findings and credential-bearing URL parameters are masked in the table, details, and logs by default; use **Reveal secrets** for temporary on-screen inspection.
 - **Summary Stats** - Live count of findings per severity level
 - **Request/Response Viewer** - Pretty/Raw/Hex/Render with auto-populated search box
-- **Result Tab** - Formatted match context with JS beautification and search highlighting
-- **Right-Click Context Menu** - Copy Value, Copy URL, Send to Repeater, Exclude Domain, Mark as False Positive
+- **Result Tab** - Formatted match context with JS beautification and search highlighting; sensitive response context is hidden until explicitly revealed
+- **Raw HTTP Viewer Protection** - Request and response editors stay hidden while secret redaction is enabled
+- **Right-Click Context Menu** - Copy Full Value, Copy URL, Send to Repeater, Exclude Domain, Mark as False Positive
 - **Save/Load Results** - Persist findings to JSON, reload in future sessions
 - **Export CSV** - Export results for reporting
+- **Safe Exports** - CSV and JSON exports ask before including full secret values; masked JSON exports also omit sensitive false-positive entries to avoid leaking them.
 - **Scope Toggle** - Scan all traffic or scope-only
 - **Custom Regex Patterns** - Add your own patterns via the Settings tab
 - **Status Bar** - Live scanning status with active thread count

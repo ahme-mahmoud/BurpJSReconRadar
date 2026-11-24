@@ -21,7 +21,7 @@ import datetime
 import traceback
 import json
 
-from javax.swing import JPanel, JTable, JScrollPane, JButton, JLabel
+from javax.swing import JPanel, JTable, JScrollPane, JButton, JLabel, JOptionPane
 from javax.swing import SwingUtilities, BorderFactory, JFileChooser, JCheckBox
 from javax.swing import JSplitPane, JTabbedPane, JTextField, RowFilter, Box
 from javax.swing import JToggleButton, JDialog, JFrame, JPopupMenu, JMenuItem, JTextArea
@@ -1969,6 +1969,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
 
         # Thread safety
         self._lock = threading.Lock()
+        self._full_values = {}
+        self._sensitive_values = set()
         self._seen = set()
         self._row_count = 0
 
@@ -2244,6 +2246,10 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
 
         # Row 2: Severity toggles + text search
         filterPanel = JPanel(FlowLayout(FlowLayout.LEFT))
+        self._showSecrets = JCheckBox("Reveal secrets", False)
+        self._showSecrets.setToolTipText("Temporarily reveal matched secret values in the UI")
+        self._showSecrets.addActionListener(SecretVisibilityListener(self))
+        filterPanel.add(self._showSecrets)
 
         filterPanel.add(JLabel("Severity: "))
         self._sevCritical = JToggleButton("CRITICAL", True)
@@ -2314,7 +2320,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         # Right-click context menu (Feature 1)
         self._popupMenu = JPopupMenu()
 
-        menuCopyValue = JMenuItem("Copy Value")
+        menuCopyValue = JMenuItem("Copy Full Value")
         menuCopyValue.addActionListener(TablePopupActionListener(self, "copy_value"))
         self._popupMenu.add(menuCopyValue)
 
@@ -2640,6 +2646,83 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         except Exception:
             pass
 
+    def _isSensitiveFinding(self, secret_type, value):
+        """Avoid masking ordinary endpoints and metadata; mask credential-like findings."""
+        st = str(secret_type).lower()
+        markers = (
+            "token", "secret", "password", "credential", "private key",
+            "access key", "access_key", "api key", "api_key", "apikey",
+            "bearer", "basic auth", "authorization", "jwt", "webhook",
+            "connection string", "database uri", "redis uri", "mongodb uri",
+            "postgresql uri", "mysql uri", "cookie",
+            # Detector names that identify credentials without descriptive keywords.
+            "google_api", "firebase", "stripe_standard_api", "stripe_restricted_api",
+        )
+        if st.startswith("custom:") or st.startswith("custom "):
+            return True
+        if self._get_severity(secret_type) in ("CRITICAL", "HIGH"):
+            return True
+        if any(marker in st for marker in markers):
+            return True
+        # Generic "Possible Leak" patterns include the key name in the matched text.
+        key_part = str(value).split(" = ", 1)[0].lower()
+        return any(marker in key_part for marker in markers)
+
+    def _maskSecret(self, value, secret_type=None):
+        """Mask credential-like values while retaining a short prefix and suffix."""
+        text = str(value)
+        if secret_type is not None and not self._isSensitiveFinding(secret_type, text):
+            return text
+        if " = " in text:
+            key, secret = text.split(" = ", 1)
+            return key + " = " + self._maskSecret(secret)
+        if len(text) <= 8:
+            return "*" * len(text)
+        keep = 3 if len(text) >= 16 else 2
+        mask_len = min(12, max(4, len(text) - (keep * 2)))
+        return text[:keep] + ("*" * mask_len) + text[-keep:]
+
+    def _redactUrl(self, url):
+        """Redact credential-like URL parameters and user-info before display/export/logging."""
+        text = str(url)
+        query_pattern = r"(?i)([?&;](?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|secret|password|passwd|pass|authorization|token|auth|credential|private[_-]?key|signature|sig|key|jwt|session[_-]?id|code)=)[^&#;\s]*"
+        text = re.sub(query_pattern, r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(https?://[^/\s:@]+:)[^/@\s]+(@)", r"\1[REDACTED]\2", text)
+        return text
+
+    def _displaySecret(self, row_num):
+        full = self._full_values.get(str(row_num), "")
+        secret_type = ""
+        for r in range(self._tableModel.getRowCount()):
+            if str(self._tableModel.getValueAt(r, 0)) == str(row_num):
+                secret_type = str(self._tableModel.getValueAt(r, 3))
+                break
+        return full if self._showSecrets.isSelected() else self._maskSecret(full, secret_type)
+
+    def _refreshSecretDisplay(self):
+        for r in range(self._tableModel.getRowCount()):
+            row_num = str(self._tableModel.getValueAt(r, 0))
+            self._tableModel.setValueAt(self._displaySecret(row_num), r, 4)
+        selected = self._table.getSelectedRow()
+        if selected >= 0:
+            model_row = self._table.convertRowIndexToModel(selected)
+            row_num = str(self._tableModel.getValueAt(model_row, 0))
+            msg = self._http_messages.get(row_num)
+            if msg is not None:
+                listener = ResultSelectionListener(self)
+                match_text, search_term = listener._buildMatchView(self, msg, model_row)
+                self._matchViewer.setText(match_text)
+                self._matchViewer.setSearchExpression(search_term)
+                if self._showSecrets.isSelected():
+                    self._requestViewer.setMessage(msg.getRequest(), True)
+                    self._responseViewer.setMessage(msg.getResponse(), False)
+                    self._viewerTabs.setSelectedIndex(1)
+                    self._fillEditorSearchBox(self._responseViewer, search_term)
+                else:
+                    self._requestViewer.setMessage(None, True)
+                    self._responseViewer.setMessage(None, False)
+                    self._viewerTabs.setSelectedIndex(2)
+
     def _addResult(self, url, secret_type, matched_value, messageInfo=None):
         try:
             matched_value = str(matched_value).strip()
@@ -2697,7 +2780,12 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             now = datetime.datetime.now()
             timestamp = "%d-%02d-%02d %02d:%02d:%02d" % (
                 now.year, now.month, now.day, now.hour, now.minute, now.second)
-            row_data = [str(row_num), severity, url_str, secret_type, matched_value, "1", timestamp]
+            self._full_values[str(row_num)] = matched_value
+            if self._isSensitiveFinding(secret_type, matched_value):
+                self._sensitive_values.add(matched_value)
+            displayed_value = matched_value if self._showSecrets.isSelected() else self._maskSecret(matched_value, secret_type)
+            safe_url = self._redactUrl(url_str)
+            row_data = [str(row_num), severity, safe_url, secret_type, displayed_value, "1", timestamp]
 
             if messageInfo is not None:
                 self._http_messages[str(row_num)] = messageInfo
@@ -2706,7 +2794,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             self._countLabel.setText("  Results: %d" % row_num)
             self._updateStatsLabel()
 
-            self._log("[+] [%s] %s -> %s : %s" % (severity, url_str, secret_type, matched_value[:80]))
+            safe_log_value = self._maskSecret(matched_value, secret_type)
+            self._log("[+] [%s] %s -> %s : %s" % (severity, safe_url, secret_type, safe_log_value[:80]))
         except Exception:
             self._log("[!] _addResult error: %s" % traceback.format_exc())
 
@@ -2807,7 +2896,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
 
             # Skip responses over 5MB
             if len(response) > self._MAX_RESPONSE_SIZE:
-                self._log("[*] Skipped %s (%.1f MB > 5MB limit)" % (url_str, len(response) / 1048576.0))
+                self._log("[*] Skipped %s (%.1f MB > 5MB limit)" % (self._redactUrl(url_str), len(response) / 1048576.0))
                 return
 
             # Skip binary file types
@@ -2857,7 +2946,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             if resp_len < 10:
                 return
 
-            self._log("[*] Scanning: %s (%d bytes)" % (url_str, resp_len))
+            self._log("[*] Scanning: %s (%d bytes)" % (self._redactUrl(url_str), resp_len))
             found_count = 0
 
             # Also scan an unescaped version of the response
@@ -3066,10 +3155,10 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
                     continue
 
             if found_count > 0:
-                self._log("[+] Found %d matches in %s" % (found_count, url_str))
+                self._log("[+] Found %d matches in %s" % (found_count, self._redactUrl(url_str)))
 
         except Exception:
-            self._log("[!] Scan error for %s:\n%s" % (url_str, traceback.format_exc()))
+            self._log("[!] Scan error for %s:\n%s" % (self._redactUrl(url_str), traceback.format_exc()))
         finally:
             self._lock.acquire()
             try:
@@ -3166,7 +3255,8 @@ class ResultSelectionListener(ListSelectionListener):
         severity = str(ext._tableModel.getValueAt(model_row, 1))
         url_str = str(ext._tableModel.getValueAt(model_row, 2))
         secret_type = str(ext._tableModel.getValueAt(model_row, 3))
-        matched_value = str(ext._tableModel.getValueAt(model_row, 4))
+        row_num = str(ext._tableModel.getValueAt(model_row, 0))
+        matched_value = ext._full_values.get(row_num, str(ext._tableModel.getValueAt(model_row, 4)))
         sources = str(ext._tableModel.getValueAt(model_row, 5))
         timestamp = str(ext._tableModel.getValueAt(model_row, 6))
 
@@ -3201,6 +3291,12 @@ class ResultSelectionListener(ListSelectionListener):
             # Extract context: 150 chars before and after
             ctx_start = max(0, idx - 150)
             ctx_end = min(len(body), idx + len(search_term) + 150)
+            if not ext._showSecrets.isSelected() and ext._isSensitiveFinding(secret_type, matched_value):
+                contexts.append((occurrence, "[Response context hidden while secret redaction is enabled]"))
+                start_pos = idx + len(search_term)
+                if occurrence >= 5:
+                    break
+                continue
             snippet = body[ctx_start:ctx_end]
 
             # Add line breaks around the match for readability
@@ -3229,7 +3325,8 @@ class ResultSelectionListener(ListSelectionListener):
         lines.append("  Matched Value:")
         lines.append("-" * 80)
         lines.append("")
-        lines.append("  %s" % matched_value)
+        display_value = matched_value if ext._showSecrets.isSelected() else ext._maskSecret(matched_value, secret_type)
+        lines.append("  %s" % display_value)
         lines.append("")
 
         if contexts:
@@ -3262,7 +3359,10 @@ class ResultSelectionListener(ListSelectionListener):
 
         lines.append("=" * 80)
         output = "\n".join(lines)
-        return output, search_term
+        display_search_term = search_term
+        if not ext._showSecrets.isSelected() and ext._isSensitiveFinding(secret_type, matched_value):
+            display_search_term = ext._maskSecret(search_term, secret_type)
+        return output, display_search_term
 
     def valueChanged(self, event):
         if event.getValueIsAdjusting():
@@ -3280,17 +3380,18 @@ class ResultSelectionListener(ListSelectionListener):
                 # Build match view first to get search_term
                 match_text, search_term = self._buildMatchView(ext, msg, model_row)
 
-                # Set all viewers
-                ext._requestViewer.setMessage(msg.getRequest(), True)
-                ext._responseViewer.setMessage(msg.getResponse(), False)
+                # Raw request/response may contain credentials. Hide them unless explicitly revealed.
+                if ext._showSecrets.isSelected():
+                    ext._requestViewer.setMessage(msg.getRequest(), True)
+                    ext._responseViewer.setMessage(msg.getResponse(), False)
+                    ext._viewerTabs.setSelectedIndex(1)
+                    ext._fillEditorSearchBox(ext._responseViewer, search_term)
+                else:
+                    ext._requestViewer.setMessage(None, True)
+                    ext._responseViewer.setMessage(None, False)
+                    ext._viewerTabs.setSelectedIndex(2)
                 ext._matchViewer.setText(match_text)
                 ext._matchViewer.setSearchExpression(search_term)
-
-                # Auto-switch to Response tab
-                ext._viewerTabs.setSelectedIndex(1)
-
-                # Fill the search box in the Pretty viewer - user presses Enter to search
-                ext._fillEditorSearchBox(ext._responseViewer, search_term)
             else:
                 ext._requestViewer.setMessage(None, True)
                 ext._responseViewer.setMessage(None, False)
@@ -3473,6 +3574,15 @@ class ApplyCustomRegexActionListener(ActionListener):
         ext._updateStatus("Applied %d custom patterns" % len(new_regexs))
 
 
+class SecretVisibilityListener(ActionListener):
+    """Refresh the UI when the user toggles secret visibility."""
+    def __init__(self, extender):
+        self._extender = extender
+
+    def actionPerformed(self, event):
+        self._extender._refreshSecretDisplay()
+
+
 class ClearActionListener(ActionListener):
     def __init__(self, extender):
         self._extender = extender
@@ -3482,6 +3592,8 @@ class ClearActionListener(ActionListener):
         ext._lock.acquire()
         try:
             ext._tableModel.setRowCount(0)
+            ext._full_values.clear()
+            ext._sensitive_values.clear()
             ext._row_count = 0
             ext._seen.clear()
             ext._http_messages.clear()
@@ -3512,6 +3624,11 @@ class ExportActionListener(ActionListener):
                 file_path = file_path + ".csv"
             try:
                 model = self._extender._tableModel
+                include_full = (JOptionPane.showConfirmDialog(
+                    self._extender._panel,
+                    "Include full matched secret values in this CSV?\nChoose No to export masked values.",
+                    "Sensitive Data Export", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
+                ) == JOptionPane.YES_OPTION)
                 with open(file_path, "w") as f:
                     # Write header
                     cols = []
@@ -3522,7 +3639,13 @@ class ExportActionListener(ActionListener):
                     for r in range(model.getRowCount()):
                         row_data = []
                         for c in range(model.getColumnCount()):
-                            val = str(model.getValueAt(r, c))
+                            if c == 4:
+                                row_num = str(model.getValueAt(r, 0))
+                                full_value = self._extender._full_values.get(row_num, str(model.getValueAt(r, c)))
+                                secret_type = str(model.getValueAt(r, 3))
+                                val = full_value if include_full else self._extender._maskSecret(full_value, secret_type)
+                            else:
+                                val = str(model.getValueAt(r, c))
                             val = val.replace('"', '""')
                             row_data.append('"' + val + '"')
                         f.write(",".join(row_data) + "\n")
@@ -3625,9 +3748,10 @@ class TablePopupActionListener(ActionListener):
                 return
             model_row = ext._table.convertRowIndexToModel(row)
             url_str = str(ext._tableModel.getValueAt(model_row, 2))
-            matched_value = str(ext._tableModel.getValueAt(model_row, 4))
             row_num = str(ext._tableModel.getValueAt(model_row, 0))
+            matched_value = ext._full_values.get(row_num, str(ext._tableModel.getValueAt(model_row, 4)))
             severity = str(ext._tableModel.getValueAt(model_row, 1))
+            secret_type = str(ext._tableModel.getValueAt(model_row, 3))
 
             if self._action == "copy_value":
                 clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
@@ -3680,7 +3804,9 @@ class TablePopupActionListener(ActionListener):
                 # Remove the row from table
                 ext._tableModel.removeRow(model_row)
                 ext._updateStatsLabel()
-                ext._log("[*] Marked as false positive: %s" % matched_value[:80])
+                # Never write the original matched value to the extension output.
+                safe_value = ext._maskSecret(matched_value, secret_type)
+                ext._log("[*] Marked as false positive: %s" % safe_value[:80])
 
         except Exception:
             ext._log("[!] Popup action error: %s" % traceback.format_exc())
@@ -3702,6 +3828,11 @@ class SaveActionListener(ActionListener):
                 file_path = file_path + ".json"
             try:
                 model = ext._tableModel
+                include_full = (JOptionPane.showConfirmDialog(
+                    ext._panel,
+                    "Include full matched secret values in this JSON file?\nChoose No to save masked values.",
+                    "Sensitive Data Export", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
+                ) == JOptionPane.YES_OPTION)
                 rows = []
                 for r in range(model.getRowCount()):
                     row_obj = {
@@ -3709,14 +3840,19 @@ class SaveActionListener(ActionListener):
                         "severity": str(model.getValueAt(r, 1)),
                         "url": str(model.getValueAt(r, 2)),
                         "type": str(model.getValueAt(r, 3)),
-                        "value": str(model.getValueAt(r, 4)),
+                        "value": (ext._full_values.get(str(model.getValueAt(r, 0)), str(model.getValueAt(r, 4)))
+                                  if include_full else ext._maskSecret(ext._full_values.get(str(model.getValueAt(r, 0)), str(model.getValueAt(r, 4))), str(model.getValueAt(r, 3)))),
                         "sources": str(model.getValueAt(r, 5)),
                         "timestamp": str(model.getValueAt(r, 6)),
                     }
                     rows.append(row_obj)
+                # False-positive entries have no detector-type metadata, so their
+                # sensitivity cannot be classified reliably. Omit them from safe exports.
+                safe_false_positives = (list(ext._false_positive_values)
+                                        if include_full else [])
                 save_data = {
                     "results": rows,
-                    "false_positive_values": list(ext._false_positive_values),
+                    "false_positive_values": safe_false_positives,
                     "excluded_domains": list(ext._excluded_domains),
                 }
                 f = open(file_path, "w")
@@ -3753,6 +3889,8 @@ class LoadActionListener(ActionListener):
                 ext._lock.acquire()
                 try:
                     ext._tableModel.setRowCount(0)
+                    ext._full_values.clear()
+                    ext._sensitive_values.clear()
                     ext._row_count = 0
                     ext._seen.clear()
                     ext._http_messages.clear()
@@ -3764,6 +3902,8 @@ class LoadActionListener(ActionListener):
                 # Restore FP values and excluded domains
                 fp_vals = save_data.get("false_positive_values", [])
                 ext._false_positive_values = set(fp_vals)
+                # Legacy JSON may contain unclassified values; treat them as sensitive on re-export.
+                ext._sensitive_values.update(fp_vals)
                 excl_domains = save_data.get("excluded_domains", [])
                 ext._excluded_domains = set(excl_domains)
 
@@ -3777,7 +3917,11 @@ class LoadActionListener(ActionListener):
                     value = row_obj.get("value", "")
                     sources = row_obj.get("sources", "1")
                     timestamp = row_obj.get("timestamp", "")
-                    ext._tableModel.addRow([row_num, severity, url, stype, value, sources, timestamp])
+                    ext._full_values[str(row_num)] = value
+                    if ext._isSensitiveFinding(stype, value):
+                        ext._sensitive_values.add(value)
+                    displayed_value = value if ext._showSecrets.isSelected() else ext._maskSecret(value, stype)
+                    ext._tableModel.addRow([row_num, severity, url, stype, displayed_value, sources, timestamp])
                     ext._row_count = ext._row_count + 1
                     if severity in ext._severity_counts:
                         ext._severity_counts[severity] = ext._severity_counts[severity] + 1
