@@ -2645,9 +2645,29 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         except Exception:
             pass
 
-    def _maskSecret(self, value):
-        """Mask sensitive values while retaining a short prefix and suffix."""
+    def _isSensitiveFinding(self, secret_type, value):
+        """Avoid masking ordinary endpoints and metadata; mask credential-like findings."""
+        st = str(secret_type).lower()
+        markers = (
+            "token", "secret", "password", "credential", "private key",
+            "access key", "access_key", "api key", "api_key", "apikey",
+            "bearer", "basic auth", "authorization", "jwt", "webhook",
+            "connection string", "database uri", "redis uri", "mongodb uri",
+            "postgresql uri", "mysql uri", "service account", "cookie",
+        )
+        if st.startswith("custom:") or st.startswith("custom "):
+            return True
+        if any(marker in st for marker in markers):
+            return True
+        # Generic "Possible Leak" patterns include the key name in the matched text.
+        key_part = str(value).split(" = ", 1)[0].lower()
+        return any(marker in key_part for marker in markers)
+
+    def _maskSecret(self, value, secret_type=None):
+        """Mask credential-like values while retaining a short prefix and suffix."""
         text = str(value)
+        if secret_type is not None and not self._isSensitiveFinding(secret_type, text):
+            return text
         if " = " in text:
             key, secret = text.split(" = ", 1)
             return key + " = " + self._maskSecret(secret)
@@ -2659,7 +2679,12 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
 
     def _displaySecret(self, row_num):
         full = self._full_values.get(str(row_num), "")
-        return full if self._showSecrets.isSelected() else self._maskSecret(full)
+        secret_type = ""
+        for r in range(self._tableModel.getRowCount()):
+            if str(self._tableModel.getValueAt(r, 0)) == str(row_num):
+                secret_type = str(self._tableModel.getValueAt(r, 3))
+                break
+        return full if self._showSecrets.isSelected() else self._maskSecret(full, secret_type)
 
     def _refreshSecretDisplay(self):
         for r in range(self._tableModel.getRowCount()):
@@ -2731,7 +2756,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             timestamp = "%d-%02d-%02d %02d:%02d:%02d" % (
                 now.year, now.month, now.day, now.hour, now.minute, now.second)
             self._full_values[str(row_num)] = matched_value
-            displayed_value = matched_value if self._showSecrets.isSelected() else self._maskSecret(matched_value)
+            displayed_value = matched_value if self._showSecrets.isSelected() else self._maskSecret(matched_value, secret_type)
             row_data = [str(row_num), severity, url_str, secret_type, displayed_value, "1", timestamp]
 
             if messageInfo is not None:
@@ -2741,7 +2766,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             self._countLabel.setText("  Results: %d" % row_num)
             self._updateStatsLabel()
 
-            self._log("[+] [%s] %s -> %s : %s" % (severity, url_str, secret_type, matched_value[:80]))
+            safe_log_value = self._maskSecret(matched_value, secret_type)
+            self._log("[+] [%s] %s -> %s : %s" % (severity, url_str, secret_type, safe_log_value[:80]))
         except Exception:
             self._log("[!] _addResult error: %s" % traceback.format_exc())
 
@@ -3238,6 +3264,11 @@ class ResultSelectionListener(ListSelectionListener):
             ctx_start = max(0, idx - 150)
             ctx_end = min(len(body), idx + len(search_term) + 150)
             snippet = body[ctx_start:ctx_end]
+            if not ext._showSecrets.isSelected() and ext._isSensitiveFinding(secret_type, matched_value):
+                masked_match = ext._maskSecret(search_term, secret_type)
+                snippet = snippet.replace(search_term, masked_match)
+                if matched_value != search_term:
+                    snippet = snippet.replace(matched_value, ext._maskSecret(matched_value, secret_type))
 
             # Add line breaks around the match for readability
             prefix = "..." if ctx_start > 0 else ""
@@ -3265,7 +3296,8 @@ class ResultSelectionListener(ListSelectionListener):
         lines.append("  Matched Value:")
         lines.append("-" * 80)
         lines.append("")
-        lines.append("  %s" % matched_value)
+        display_value = matched_value if ext._showSecrets.isSelected() else ext._maskSecret(matched_value, secret_type)
+        lines.append("  %s" % display_value)
         lines.append("")
 
         if contexts:
@@ -3576,7 +3608,8 @@ class ExportActionListener(ActionListener):
                             if c == 4:
                                 row_num = str(model.getValueAt(r, 0))
                                 full_value = self._extender._full_values.get(row_num, str(model.getValueAt(r, c)))
-                                val = full_value if include_full else self._extender._maskSecret(full_value)
+                                secret_type = str(model.getValueAt(r, 3))
+                                val = full_value if include_full else self._extender._maskSecret(full_value, secret_type)
                             else:
                                 val = str(model.getValueAt(r, c))
                             val = val.replace('"', '""')
@@ -3771,7 +3804,7 @@ class SaveActionListener(ActionListener):
                         "url": str(model.getValueAt(r, 2)),
                         "type": str(model.getValueAt(r, 3)),
                         "value": (ext._full_values.get(str(model.getValueAt(r, 0)), str(model.getValueAt(r, 4)))
-                                  if include_full else ext._maskSecret(ext._full_values.get(str(model.getValueAt(r, 0)), str(model.getValueAt(r, 4))))),
+                                  if include_full else ext._maskSecret(ext._full_values.get(str(model.getValueAt(r, 0)), str(model.getValueAt(r, 4))), str(model.getValueAt(r, 3)))),
                         "sources": str(model.getValueAt(r, 5)),
                         "timestamp": str(model.getValueAt(r, 6)),
                     }
@@ -3841,7 +3874,7 @@ class LoadActionListener(ActionListener):
                     sources = row_obj.get("sources", "1")
                     timestamp = row_obj.get("timestamp", "")
                     ext._full_values[str(row_num)] = value
-                    displayed_value = value if ext._showSecrets.isSelected() else ext._maskSecret(value)
+                    displayed_value = value if ext._showSecrets.isSelected() else ext._maskSecret(value, stype)
                     ext._tableModel.addRow([row_num, severity, url, stype, displayed_value, sources, timestamp])
                     ext._row_count = ext._row_count + 1
                     if severity in ext._severity_counts:
