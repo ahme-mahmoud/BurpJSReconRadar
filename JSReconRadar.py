@@ -2889,7 +2889,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
 
             # Skip responses over 5MB
             if len(response) > self._MAX_RESPONSE_SIZE:
-                self._log("[*] Skipped %s (%.1f MB > 5MB limit)" % (url_str, len(response) / 1048576.0))
+                self._log("[*] Skipped %s (%.1f MB > 5MB limit)" % (self._redactUrl(url_str), len(response) / 1048576.0))
                 return
 
             # Skip binary file types
@@ -2939,7 +2939,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             if resp_len < 10:
                 return
 
-            self._log("[*] Scanning: %s (%d bytes)" % (url_str, resp_len))
+            self._log("[*] Scanning: %s (%d bytes)" % (self._redactUrl(url_str), resp_len))
             found_count = 0
 
             # Also scan an unescaped version of the response
@@ -3148,10 +3148,10 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
                     continue
 
             if found_count > 0:
-                self._log("[+] Found %d matches in %s" % (found_count, url_str))
+                self._log("[+] Found %d matches in %s" % (found_count, self._redactUrl(url_str)))
 
         except Exception:
-            self._log("[!] Scan error for %s:\n%s" % (url_str, traceback.format_exc()))
+            self._log("[!] Scan error for %s:\n%s" % (self._redactUrl(url_str), traceback.format_exc()))
         finally:
             self._lock.acquire()
             try:
@@ -3743,6 +3743,7 @@ class TablePopupActionListener(ActionListener):
             row_num = str(ext._tableModel.getValueAt(model_row, 0))
             matched_value = ext._full_values.get(row_num, str(ext._tableModel.getValueAt(model_row, 4)))
             severity = str(ext._tableModel.getValueAt(model_row, 1))
+            secret_type = str(ext._tableModel.getValueAt(model_row, 3))
 
             if self._action == "copy_value":
                 clipboard = Toolkit.getDefaultToolkit().getSystemClipboard()
@@ -3795,7 +3796,8 @@ class TablePopupActionListener(ActionListener):
                 # Remove the row from table
                 ext._tableModel.removeRow(model_row)
                 ext._updateStatsLabel()
-                ext._log("[*] Marked as false positive: %s" % matched_value[:80])
+                safe_value = ext._maskSecret(matched_value, secret_type)
+                ext._log("[*] Marked as false positive: %s" % safe_value[:80])
 
         except Exception:
             ext._log("[!] Popup action error: %s" % traceback.format_exc())
