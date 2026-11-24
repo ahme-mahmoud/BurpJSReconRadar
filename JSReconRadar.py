@@ -2319,7 +2319,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         # Right-click context menu (Feature 1)
         self._popupMenu = JPopupMenu()
 
-        menuCopyValue = JMenuItem("Copy Value")
+        menuCopyValue = JMenuItem("Copy Full Value")
         menuCopyValue.addActionListener(TablePopupActionListener(self, "copy_value"))
         self._popupMenu.add(menuCopyValue)
 
@@ -2653,7 +2653,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             "access key", "access_key", "api key", "api_key", "apikey",
             "bearer", "basic auth", "authorization", "jwt", "webhook",
             "connection string", "database uri", "redis uri", "mongodb uri",
-            "postgresql uri", "mysql uri", "service account", "cookie",
+            "postgresql uri", "mysql uri", "cookie",
         )
         if st.startswith("custom:") or st.startswith("custom "):
             return True
@@ -2697,6 +2697,14 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             msg = self._http_messages.get(row_num)
             if msg is not None:
                 ResultSelectionListener(self)._buildMatchView(self, msg, model_row)
+                if self._showSecrets.isSelected():
+                    self._requestViewer.setMessage(msg.getRequest(), True)
+                    self._responseViewer.setMessage(msg.getResponse(), False)
+                    self._viewerTabs.setSelectedIndex(1)
+                else:
+                    self._requestViewer.setMessage(None, True)
+                    self._responseViewer.setMessage(None, False)
+                    self._viewerTabs.setSelectedIndex(2)
 
     def _addResult(self, url, secret_type, matched_value, messageInfo=None):
         try:
@@ -3263,12 +3271,13 @@ class ResultSelectionListener(ListSelectionListener):
             # Extract context: 150 chars before and after
             ctx_start = max(0, idx - 150)
             ctx_end = min(len(body), idx + len(search_term) + 150)
-            snippet = body[ctx_start:ctx_end]
             if not ext._showSecrets.isSelected() and ext._isSensitiveFinding(secret_type, matched_value):
-                masked_match = ext._maskSecret(search_term, secret_type)
-                snippet = snippet.replace(search_term, masked_match)
-                if matched_value != search_term:
-                    snippet = snippet.replace(matched_value, ext._maskSecret(matched_value, secret_type))
+                contexts.append((occurrence, "[Response context hidden while secret redaction is enabled]"))
+                start_pos = idx + len(search_term)
+                if occurrence >= 5:
+                    break
+                continue
+            snippet = body[ctx_start:ctx_end]
 
             # Add line breaks around the match for readability
             prefix = "..." if ctx_start > 0 else ""
@@ -3330,7 +3339,10 @@ class ResultSelectionListener(ListSelectionListener):
 
         lines.append("=" * 80)
         output = "\n".join(lines)
-        return output, search_term
+        display_search_term = search_term
+        if not ext._showSecrets.isSelected() and ext._isSensitiveFinding(secret_type, matched_value):
+            display_search_term = ext._maskSecret(search_term, secret_type)
+        return output, display_search_term
 
     def valueChanged(self, event):
         if event.getValueIsAdjusting():
@@ -3348,17 +3360,18 @@ class ResultSelectionListener(ListSelectionListener):
                 # Build match view first to get search_term
                 match_text, search_term = self._buildMatchView(ext, msg, model_row)
 
-                # Set all viewers
-                ext._requestViewer.setMessage(msg.getRequest(), True)
-                ext._responseViewer.setMessage(msg.getResponse(), False)
+                # Raw request/response may contain credentials. Hide them unless explicitly revealed.
+                if ext._showSecrets.isSelected():
+                    ext._requestViewer.setMessage(msg.getRequest(), True)
+                    ext._responseViewer.setMessage(msg.getResponse(), False)
+                    ext._viewerTabs.setSelectedIndex(1)
+                    ext._fillEditorSearchBox(ext._responseViewer, search_term)
+                else:
+                    ext._requestViewer.setMessage(None, True)
+                    ext._responseViewer.setMessage(None, False)
+                    ext._viewerTabs.setSelectedIndex(2)
                 ext._matchViewer.setText(match_text)
                 ext._matchViewer.setSearchExpression(search_term)
-
-                # Auto-switch to Response tab
-                ext._viewerTabs.setSelectedIndex(1)
-
-                # Fill the search box in the Pretty viewer - user presses Enter to search
-                ext._fillEditorSearchBox(ext._responseViewer, search_term)
             else:
                 ext._requestViewer.setMessage(None, True)
                 ext._responseViewer.setMessage(None, False)
