@@ -2680,9 +2680,9 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
     def _redactUrl(self, url):
         """Redact credential-like URL parameters and user-info before display/export/logging."""
         text = str(url)
-        query_pattern = r"(?i)([?&;](?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|secret|password|passwd|authorization|token|auth)=)[^&#;\\s]*"
-        text = re.sub(query_pattern, r"\\1[REDACTED]", text)
-        text = re.sub(r"(?i)(https?://[^/\\s:@]+:)[^/@\\s]+(@)", r"\\1[REDACTED]\\2", text)
+        query_pattern = r"(?i)([?&;](?:access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|client[_-]?secret|secret|password|passwd|authorization|token|auth)=)[^&#;\s]*"
+        text = re.sub(query_pattern, r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(https?://[^/\s:@]+:)[^/@\s]+(@)", r"\1[REDACTED]\2", text)
         return text
 
     def _displaySecret(self, row_num):
