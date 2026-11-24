@@ -2655,6 +2655,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             "bearer", "basic auth", "authorization", "jwt", "webhook",
             "connection string", "database uri", "redis uri", "mongodb uri",
             "postgresql uri", "mysql uri", "cookie",
+            # Detector names that identify credentials without descriptive keywords.
+            "google_api", "firebase", "stripe_standard_api", "stripe_restricted_api",
         )
         if st.startswith("custom:") or st.startswith("custom "):
             return True
@@ -3802,6 +3804,7 @@ class TablePopupActionListener(ActionListener):
                 # Remove the row from table
                 ext._tableModel.removeRow(model_row)
                 ext._updateStatsLabel()
+                # Never write the original matched value to the extension output.
                 safe_value = ext._maskSecret(matched_value, secret_type)
                 ext._log("[*] Marked as false positive: %s" % safe_value[:80])
 
@@ -3843,10 +3846,10 @@ class SaveActionListener(ActionListener):
                         "timestamp": str(model.getValueAt(r, 6)),
                     }
                     rows.append(row_obj)
-                safe_false_positives = list(ext._false_positive_values)
-                if not include_full:
-                    safe_false_positives = [value for value in safe_false_positives
-                                            if value not in ext._sensitive_values]
+                # False-positive entries have no detector-type metadata, so their
+                # sensitivity cannot be classified reliably. Omit them from safe exports.
+                safe_false_positives = (list(ext._false_positive_values)
+                                        if include_full else [])
                 save_data = {
                     "results": rows,
                     "false_positive_values": safe_false_positives,
