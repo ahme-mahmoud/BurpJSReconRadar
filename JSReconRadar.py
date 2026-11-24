@@ -1970,6 +1970,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
         # Thread safety
         self._lock = threading.Lock()
         self._full_values = {}
+        self._sensitive_values = set()
         self._seen = set()
         self._row_count = 0
 
@@ -2778,6 +2779,8 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             timestamp = "%d-%02d-%02d %02d:%02d:%02d" % (
                 now.year, now.month, now.day, now.hour, now.minute, now.second)
             self._full_values[str(row_num)] = matched_value
+            if self._isSensitiveFinding(secret_type, matched_value):
+                self._sensitive_values.add(matched_value)
             displayed_value = matched_value if self._showSecrets.isSelected() else self._maskSecret(matched_value, secret_type)
             safe_url = self._redactUrl(url_str)
             row_data = [str(row_num), severity, safe_url, secret_type, displayed_value, "1", timestamp]
@@ -3588,6 +3591,7 @@ class ClearActionListener(ActionListener):
         try:
             ext._tableModel.setRowCount(0)
             ext._full_values.clear()
+            ext._sensitive_values.clear()
             ext._row_count = 0
             ext._seen.clear()
             ext._http_messages.clear()
@@ -3839,9 +3843,13 @@ class SaveActionListener(ActionListener):
                         "timestamp": str(model.getValueAt(r, 6)),
                     }
                     rows.append(row_obj)
+                safe_false_positives = list(ext._false_positive_values)
+                if not include_full:
+                    safe_false_positives = [value for value in safe_false_positives
+                                            if value not in ext._sensitive_values]
                 save_data = {
                     "results": rows,
-                    "false_positive_values": list(ext._false_positive_values),
+                    "false_positive_values": safe_false_positives,
                     "excluded_domains": list(ext._excluded_domains),
                 }
                 f = open(file_path, "w")
@@ -3879,6 +3887,7 @@ class LoadActionListener(ActionListener):
                 try:
                     ext._tableModel.setRowCount(0)
                     ext._full_values.clear()
+                    ext._sensitive_values.clear()
                     ext._row_count = 0
                     ext._seen.clear()
                     ext._http_messages.clear()
@@ -3890,6 +3899,8 @@ class LoadActionListener(ActionListener):
                 # Restore FP values and excluded domains
                 fp_vals = save_data.get("false_positive_values", [])
                 ext._false_positive_values = set(fp_vals)
+                # Legacy JSON may contain unclassified values; treat them as sensitive on re-export.
+                ext._sensitive_values.update(fp_vals)
                 excl_domains = save_data.get("excluded_domains", [])
                 ext._excluded_domains = set(excl_domains)
 
@@ -3904,6 +3915,8 @@ class LoadActionListener(ActionListener):
                     sources = row_obj.get("sources", "1")
                     timestamp = row_obj.get("timestamp", "")
                     ext._full_values[str(row_num)] = value
+                    if ext._isSensitiveFinding(stype, value):
+                        ext._sensitive_values.add(value)
                     displayed_value = value if ext._showSecrets.isSelected() else ext._maskSecret(value, stype)
                     ext._tableModel.addRow([row_num, severity, url, stype, displayed_value, sources, timestamp])
                     ext._row_count = ext._row_count + 1
