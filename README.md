@@ -39,7 +39,8 @@ Works on **both Burp Suite Community and Professional editions**.
 - **Secret Redaction** - Credential-like findings are masked in the table, details, and logs by default; use **Reveal secrets** for temporary on-screen inspection.
 - **Summary Stats** - Live count of findings per severity level
 - **Request/Response Viewer** - Pretty/Raw/Hex/Render with auto-populated search box
-- **Result Tab** - Formatted match context with JS beautification and search highlighting
+- **Result Tab** - Formatted match context with JS beautification and search highlighting; sensitive response context is hidden until explicitly revealed
+- **Raw HTTP Viewer Protection** - Request and response editors stay hidden while secret redaction is enabled
 - **Right-Click Context Menu** - Copy Value, Copy URL, Send to Repeater, Exclude Domain, Mark as False Positive
 - **Save/Load Results** - Persist findings to JSON, reload in future sessions
 - **Export CSV** - Export results for reporting
