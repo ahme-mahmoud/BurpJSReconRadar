@@ -44,7 +44,7 @@ Works on **both Burp Suite Community and Professional editions**.
 - **Right-Click Context Menu** - Copy Full Value, Copy URL, Send to Repeater, Exclude Domain, Mark as False Positive
 - **Save/Load Results** - Persist findings to JSON, reload in future sessions
 - **Export CSV** - Export results for reporting
-- **Safe Exports** - CSV and JSON exports ask before including full secret values; masked export is the safer default.
+- **Safe Exports** - CSV and JSON exports ask before including full secret values; masked JSON exports also omit sensitive false-positive entries to avoid leaking them.
 - **Scope Toggle** - Scan all traffic or scope-only
 - **Custom Regex Patterns** - Add your own patterns via the Settings tab
 - **Status Bar** - Live scanning status with active thread count
