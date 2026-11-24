@@ -2696,11 +2696,15 @@ class BurpExtender(IBurpExtender, IScannerCheck, IHttpListener, ITab):
             row_num = str(self._tableModel.getValueAt(model_row, 0))
             msg = self._http_messages.get(row_num)
             if msg is not None:
-                ResultSelectionListener(self)._buildMatchView(self, msg, model_row)
+                listener = ResultSelectionListener(self)
+                match_text, search_term = listener._buildMatchView(self, msg, model_row)
+                self._matchViewer.setText(match_text)
+                self._matchViewer.setSearchExpression(search_term)
                 if self._showSecrets.isSelected():
                     self._requestViewer.setMessage(msg.getRequest(), True)
                     self._responseViewer.setMessage(msg.getResponse(), False)
                     self._viewerTabs.setSelectedIndex(1)
+                    self._fillEditorSearchBox(self._responseViewer, search_term)
                 else:
                     self._requestViewer.setMessage(None, True)
                     self._responseViewer.setMessage(None, False)
